@@ -1,0 +1,21 @@
+# Large/local datasets
+data/raw/
+data/processed/*.parquet
+data/processed/*.csv
+
+# Generated research outputs
+output/
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local secrets
+.env
+.env.*
+!.env.example
