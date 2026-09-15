@@ -9,16 +9,32 @@
 - `data/processed/prices.parquet`
 - `data/processed/stock_info.parquet`
 
-這兩個檔案須由既有正式資料建置流程恢復。為避免研究口徑漂移，不以簡化的 `prev_close × 1.1` 取代官方 tick-size／漲停價邏輯。
+這兩個檔案由本 repository 的官方資料 builder 建立。為避免研究口徑漂移，不以簡化的 `prev_close × 1.1` 取代官方 tick-size／漲停價邏輯。
 
-## Current recovery scope
+## Build the official market dataset
 
-目前只允許恢復：
+```bash
+python -m pip install -r requirements.txt
+python src/build_market_data.py --start 2021-01-01 --end 2026-09-15
+```
 
-1. `prices.parquet`
-2. `stock_info.parquet`
+The builder downloads official TWSE and TPEx daily quotes, caches raw responses
+so interrupted runs can resume, filters to ordinary shares using the official
+company lists, validates the result, and writes:
 
-不重跑 feature scan、event dataset、backtest 或研究報告。
+- `data/processed/prices.parquet`
+- `data/processed/stock_info.parquet`
+- `data/processed/manifest.json`
+
+To copy the completed snapshot into a mounted or synced Google Drive folder:
+
+```bash
+python src/build_market_data.py --publish-dir "/path/to/Google Drive/taiwan-limitup-research"
+```
+
+This is a fixed snapshot builder, not a daily updater. Raw prices are not
+adjusted for dividends or splits. TPEx official next-session reference/limit
+prices are retained when published; no price limit is approximated.
 
 ## Expected paths
 
@@ -31,6 +47,8 @@ src/
 output/
 ```
 
-## Safety
+## Tests
 
-在資料來源與正式 builder 尚未確認前，不執行重建，以免產出和前序研究定義不一致的 parquet。
+```bash
+pytest -q
+```
