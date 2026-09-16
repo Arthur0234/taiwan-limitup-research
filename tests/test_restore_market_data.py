@@ -1,5 +1,7 @@
 import pandas as pd
+import pytest
 
+from src.build_market_data import validate
 from src.restore_market_data import audit_tick_rule, parse_finmind_prices, price_limits
 
 
@@ -35,3 +37,22 @@ def test_tpex_audit_allows_rare_official_exceptions():
     rows.append({"next_reference_price": 100, "next_limit_up": 9995, "next_limit_down": 0.01})
     result = audit_tick_rule(pd.DataFrame(rows))
     assert result["exceptions"] == 1
+
+
+def test_emerging_open_can_be_outside_range_but_is_not_valid_twse_ohlc():
+    data = parse_finmind_prices([{
+        "date": "2021-01-04", "stock_id": "2248", "Trading_Volume": 10,
+        "Trading_money": 100, "Trading_turnover": 2, "open": 21.9,
+        "max": 24.45, "min": 23.0, "close": 24.45, "spread": 1.45,
+    }], "twse")
+    assert data.iloc[0].open < data.iloc[0].low
+
+
+def test_validation_rejects_missing_ohlc():
+    prices = pd.DataFrame([{
+        "stock_id": "2330", "date": pd.Timestamp("2026-09-01"),
+        "open": None, "high": None, "low": None, "close": None,
+    }])
+    stock_info = pd.DataFrame([{"stock_id": "2330"}])
+    with pytest.raises(ValueError, match="missing OHLC"):
+        validate(prices, stock_info, pd.Timestamp("2026-09-01").date(), pd.Timestamp("2026-09-01").date())

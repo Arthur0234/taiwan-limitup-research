@@ -26,11 +26,22 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from src.build_market_data import INFO_COLUMNS, is_ordinary_stock_code, parse_tpex_daily, validate
+from src.build_market_data import (
+    INFO_COLUMNS,
+    is_ordinary_stock_code,
+    parse_stock_info,
+    parse_tpex_daily,
+    validate,
+)
 
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
+TWSE_COMPANY_INFO_API = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+TPEX_COMPANY_INFO_API = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 USER_AGENT = "taiwan-limitup-research/1.1 (personal-research-data-restore)"
+# 6806 is temporarily absent from the current-company OpenAPI snapshot, but
+# TWSE's listing announcement records first trading on 2021-11-15.
+TWSE_LISTING_DATE_OVERRIDES = {"6806": date(2021, 11, 15)}
 PRICE_COLUMNS = [
     "stock_id", "date", "market", "open", "high", "low", "close",
     "volume", "turnover", "transactions", "reference_price", "limit_up",
@@ -49,6 +60,14 @@ def cli() -> argparse.Namespace:
     parser.add_argument("--out-dir", default="data/processed")
     parser.add_argument("--finmind-cache", default="data/raw/finmind")
     parser.add_argument("--tpex-cache", default="data/raw/official/tpex")
+    parser.add_argument(
+        "--twse-company-info-cache",
+        default="data/raw/official/twse_company_info.json.gz",
+    )
+    parser.add_argument(
+        "--tpex-company-info-cache",
+        default="data/raw/official/tpex_company_info.json.gz",
+    )
     parser.add_argument("--token-env", default="FINMIND_TOKEN")
     parser.add_argument("--request-delay", type=float, default=0.0)
     parser.add_argument("--workers", type=int, default=2)
@@ -82,6 +101,89 @@ def fetch_finmind(parameters: dict[str, str], token: str, retries: int = 3) -> l
         if attempt + 1 < retries:
             time.sleep(min(60, 2 ** attempt) + random.random())
     raise RuntimeError("FinMind failed after bounded server/network retries") from last_error
+
+
+def fetch_public_json(url: str, retries: int = 3) -> Any:
+    request = Request(url, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urlopen(request, timeout=120) as response:
+                return json.loads(response.read().decode("utf-8-sig"))
+        except HTTPError as exc:
+            if 400 <= exc.code < 500:
+                raise ClientStop(f"official OpenAPI HTTP {exc.code}; stop and inspect") from exc
+            last_error = exc
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            last_error = exc
+        if attempt + 1 < retries:
+            time.sleep(min(60, 2 ** attempt) + random.random())
+    raise RuntimeError("official OpenAPI failed after bounded retries") from last_error
+
+
+def load_twse_listing_dates(
+    company_info_cache: Path, finmind_cache: Path, retries: int,
+) -> dict[str, date]:
+    if company_info_cache.exists():
+        with gzip.open(company_info_cache, "rt", encoding="utf-8") as handle:
+            company_rows = json.load(handle)
+    else:
+        company_rows = fetch_public_json(TWSE_COMPANY_INFO_API, retries)
+        company_info_cache.parent.mkdir(parents=True, exist_ok=True)
+        temporary = company_info_cache.with_suffix(".tmp")
+        with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+            json.dump(company_rows, handle, ensure_ascii=False)
+        temporary.replace(company_info_cache)
+
+    dates: dict[str, date] = {}
+    for row in company_rows:
+        stock_id = str(row.get("公司代號", "")).strip()
+        raw_date = str(row.get("上市日期", "")).strip()
+        if stock_id and len(raw_date) == 8 and raw_date.isdigit():
+            dates[stock_id] = datetime.strptime(raw_date, "%Y%m%d").date()
+
+    # FinMind keeps an `emerging` row whose date ends at the market transfer.
+    # This fallback covers securities that have since transferred away from TWSE.
+    info_path = finmind_cache / "stock_info.json.gz"
+    with gzip.open(info_path, "rt", encoding="utf-8") as handle:
+        for row in json.load(handle):
+            if str(row.get("type", "")).lower() != "emerging":
+                continue
+            stock_id = str(row.get("stock_id", "")).strip()
+            ended = pd.to_datetime(row.get("date"), errors="coerce")
+            if stock_id and not pd.isna(ended) and stock_id not in dates:
+                dates[stock_id] = ended.date() + pd.Timedelta(days=1)
+    dates.update(TWSE_LISTING_DATE_OVERRIDES)
+    return dates
+
+
+def load_company_info_rows(cache_path: Path, url: str, retries: int) -> list[dict[str, Any]]:
+    if cache_path.exists():
+        with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    rows = fetch_public_json(url, retries)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(".tmp")
+    with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+        json.dump(rows, handle, ensure_ascii=False)
+    temporary.replace(cache_path)
+    return rows
+
+
+def enrich_stock_info_with_official(
+    stock_info: pd.DataFrame, twse_cache: Path, tpex_cache: Path, retries: int,
+) -> pd.DataFrame:
+    twse_rows = load_company_info_rows(twse_cache, TWSE_COMPANY_INFO_API, retries)
+    tpex_rows = load_company_info_rows(tpex_cache, TPEX_COMPANY_INFO_API, retries)
+    official = parse_stock_info(twse_rows, tpex_rows).set_index(["stock_id", "market"])
+    result = stock_info.copy().set_index(["stock_id", "market"])
+    # FinMind's `date` is a row update/market-transition date, not reliably the
+    # original listing date. Only publish dates supported by official company lists.
+    result["listing_date"] = official["listing_date"].reindex(result.index)
+    for column in ("name", "industry_code", "industry_category"):
+        authoritative = official[column].reindex(result.index)
+        result[column] = authoritative.combine_first(result[column])
+    return result.reset_index()[INFO_COLUMNS]
 
 
 def load_stock_info(cache_dir: Path, token: str, retries: int) -> pd.DataFrame:
@@ -179,6 +281,7 @@ def parse_finmind_prices(records: list[dict[str, Any]], market: str) -> pd.DataF
 def load_twse_prices(
     stock_info: pd.DataFrame, cache_dir: Path, start: date, end: date,
     token: str, retries: int, delay: float, workers: int = 2, min_start_interval: float = 13.0,
+    listing_dates: dict[str, date] | None = None,
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     ids = sorted(stock_info.loc[stock_info.market.eq("twse"), "stock_id"].unique())
@@ -208,7 +311,11 @@ def load_twse_prices(
             temporary.replace(path)
             if delay:
                 time.sleep(delay)
-        return parse_finmind_prices(records, "twse")
+        frame = parse_finmind_prices(records, "twse")
+        listed_from = (listing_dates or {}).get(stock_id)
+        if listed_from is not None and not frame.empty:
+            frame = frame[frame["date"] >= pd.Timestamp(listed_from)]
+        return frame
 
     # FinMind documents a 300 requests/hour free limit. Two workers hide network
     # latency, while the global 13-second start interval caps this process below
@@ -244,6 +351,10 @@ def load_tpex_prices(cache_dir: Path, start: date, end: date) -> pd.DataFrame:
     data["limit_up"] = grouped["next_limit_up"].shift(1)
     data["limit_down"] = grouped["next_limit_down"].shift(1)
     data["date"] = pd.to_datetime(data["date"])
+    # TPEx can publish volume/turnover from non-regular sessions while the
+    # regular-session OHLC fields remain `--`. Those rows have no usable daily
+    # bar and must not enter OHLC research.
+    data = data.dropna(subset=["open", "high", "low", "close"])
     return data[PRICE_COLUMNS]
 
 
@@ -269,12 +380,24 @@ def main() -> None:
     token = os.environ.get(args.token_env, "")
 
     stock_info = load_stock_info(finmind_cache, token, args.retries)
+    twse_company_cache = Path(args.twse_company_info_cache)
+    listing_dates = load_twse_listing_dates(
+        twse_company_cache, finmind_cache, args.retries,
+    )
+    stock_info = enrich_stock_info_with_official(
+        stock_info, twse_company_cache, Path(args.tpex_company_info_cache), args.retries,
+    )
     tpex = load_tpex_prices(Path(args.tpex_cache), start, end)
     tick_audit = audit_tick_rule(tpex)
     twse = load_twse_prices(
         stock_info, finmind_cache, start, end, token, args.retries, args.request_delay,
-        args.workers, args.min_start_interval,
+        args.workers, args.min_start_interval, listing_dates,
     )
+    # The per-security FinMind history may include periods when the same code
+    # traded on TPEx. Prefer the preserved official TPEx row at that grain.
+    tpex_keys = pd.MultiIndex.from_frame(tpex[["stock_id", "date"]])
+    twse_keys = pd.MultiIndex.from_frame(twse[["stock_id", "date"]])
+    twse = twse[~twse_keys.isin(tpex_keys)]
     prices = pd.concat([twse, tpex], ignore_index=True)
     prices = prices[prices.stock_id.map(is_ordinary_stock_code)].copy()
     prices = prices.drop_duplicates(["stock_id", "date"]).sort_values(["stock_id", "date"])
@@ -298,7 +421,7 @@ def main() -> None:
         "sources": {
             "twse_ohlc": "FinMind TaiwanStockPrice per-security API",
             "tpex_ohlc_and_limits": "preserved TPEx official daily cache",
-            "stock_info": "FinMind TaiwanStockInfo",
+            "stock_info": "FinMind historical universe enriched with TWSE/TPEx official company OpenAPI",
         },
         "adjusted_prices": False,
         "twse_limit_price_note": "Calculated from FinMind reference price and standard TWSE tick rules; special-limit/no-limit cases may differ.",
