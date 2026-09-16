@@ -223,6 +223,9 @@ def validate(prices: pd.DataFrame, stock_info: pd.DataFrame, start: date, end: d
         raise ValueError("prices contain securities absent from stock_info")
     if prices["date"].min().date() < start or prices["date"].max().date() > end:
         raise ValueError("price dates fall outside requested range")
+    missing_ohlc = prices[["open", "high", "low", "close"]].isna().any(axis=1)
+    if missing_ohlc.any():
+        raise ValueError(f"{int(missing_ohlc.sum())} rows contain missing OHLC")
     invalid = prices[["open", "high", "low", "close"]].le(0).any(axis=1)
     if invalid.any():
         raise ValueError(f"{int(invalid.sum())} rows contain non-positive OHLC")
