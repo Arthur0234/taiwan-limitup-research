@@ -1,0 +1,57 @@
+name: Restore TWSE cache
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/restore-twse-cache.yml
+
+permissions:
+  contents: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: pip install pandas pyarrow
+
+      - name: Download TWSE data through documented FinMind API
+        run: |
+          python -u - <<'PY'
+          from datetime import date
+          from pathlib import Path
+
+          from src.restore_market_data import load_stock_info, load_twse_prices
+
+          cache = Path("data/raw/finmind")
+          stock_info = load_stock_info(cache, token="", retries=3)
+          load_twse_prices(
+              stock_info=stock_info,
+              cache_dir=cache,
+              start=date(2021, 1, 1),
+              end=date(2026, 9, 15),
+              token="",
+              retries=3,
+              delay=0,
+              workers=2,
+              min_start_interval=13.0,
+          )
+          PY
+
+      - name: Upload resumable TWSE cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: twse-finmind-cache
+          path: data/raw/finmind
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 6
