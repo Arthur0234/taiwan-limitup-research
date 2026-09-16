@@ -26,11 +26,18 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from src.build_market_data import INFO_COLUMNS, is_ordinary_stock_code, parse_tpex_daily, validate
+from src.build_market_data import (
+    INFO_COLUMNS,
+    is_ordinary_stock_code,
+    parse_stock_info,
+    parse_tpex_daily,
+    validate,
+)
 
 
 FINMIND_API = "https://api.finmindtrade.com/api/v4/data"
 TWSE_COMPANY_INFO_API = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
+TPEX_COMPANY_INFO_API = "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O"
 USER_AGENT = "taiwan-limitup-research/1.1 (personal-research-data-restore)"
 # 6806 is temporarily absent from the current-company OpenAPI snapshot, but
 # TWSE's listing announcement records first trading on 2021-11-15.
@@ -56,6 +63,10 @@ def cli() -> argparse.Namespace:
     parser.add_argument(
         "--twse-company-info-cache",
         default="data/raw/official/twse_company_info.json.gz",
+    )
+    parser.add_argument(
+        "--tpex-company-info-cache",
+        default="data/raw/official/tpex_company_info.json.gz",
     )
     parser.add_argument("--token-env", default="FINMIND_TOKEN")
     parser.add_argument("--request-delay", type=float, default=0.0)
@@ -144,6 +155,35 @@ def load_twse_listing_dates(
                 dates[stock_id] = ended.date() + pd.Timedelta(days=1)
     dates.update(TWSE_LISTING_DATE_OVERRIDES)
     return dates
+
+
+def load_company_info_rows(cache_path: Path, url: str, retries: int) -> list[dict[str, Any]]:
+    if cache_path.exists():
+        with gzip.open(cache_path, "rt", encoding="utf-8") as handle:
+            return json.load(handle)
+    rows = fetch_public_json(url, retries)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache_path.with_suffix(".tmp")
+    with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+        json.dump(rows, handle, ensure_ascii=False)
+    temporary.replace(cache_path)
+    return rows
+
+
+def enrich_stock_info_with_official(
+    stock_info: pd.DataFrame, twse_cache: Path, tpex_cache: Path, retries: int,
+) -> pd.DataFrame:
+    twse_rows = load_company_info_rows(twse_cache, TWSE_COMPANY_INFO_API, retries)
+    tpex_rows = load_company_info_rows(tpex_cache, TPEX_COMPANY_INFO_API, retries)
+    official = parse_stock_info(twse_rows, tpex_rows).set_index(["stock_id", "market"])
+    result = stock_info.copy().set_index(["stock_id", "market"])
+    # FinMind's `date` is a row update/market-transition date, not reliably the
+    # original listing date. Only publish dates supported by official company lists.
+    result["listing_date"] = official["listing_date"].reindex(result.index)
+    for column in ("name", "industry_code", "industry_category"):
+        authoritative = official[column].reindex(result.index)
+        result[column] = authoritative.combine_first(result[column])
+    return result.reset_index()[INFO_COLUMNS]
 
 
 def load_stock_info(cache_dir: Path, token: str, retries: int) -> pd.DataFrame:
@@ -340,8 +380,12 @@ def main() -> None:
     token = os.environ.get(args.token_env, "")
 
     stock_info = load_stock_info(finmind_cache, token, args.retries)
+    twse_company_cache = Path(args.twse_company_info_cache)
     listing_dates = load_twse_listing_dates(
-        Path(args.twse_company_info_cache), finmind_cache, args.retries,
+        twse_company_cache, finmind_cache, args.retries,
+    )
+    stock_info = enrich_stock_info_with_official(
+        stock_info, twse_company_cache, Path(args.tpex_company_info_cache), args.retries,
     )
     tpex = load_tpex_prices(Path(args.tpex_cache), start, end)
     tick_audit = audit_tick_rule(tpex)
@@ -377,7 +421,7 @@ def main() -> None:
         "sources": {
             "twse_ohlc": "FinMind TaiwanStockPrice per-security API",
             "tpex_ohlc_and_limits": "preserved TPEx official daily cache",
-            "stock_info": "FinMind TaiwanStockInfo",
+            "stock_info": "FinMind historical universe enriched with TWSE/TPEx official company OpenAPI",
         },
         "adjusted_prices": False,
         "twse_limit_price_note": "Calculated from FinMind reference price and standard TWSE tick rules; special-limit/no-limit cases may differ.",
