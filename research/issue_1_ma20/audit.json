@@ -1,0 +1,35 @@
+{
+  "data_end": "2026-08-11",
+  "price_date_min": "2021-01-04",
+  "price_date_max": "2026-08-11",
+  "price_rows": 2448100,
+  "duplicate_price_keys": 0,
+  "recovered_cohort_counts": {
+    "LIMIT_UP/A1_ALL_LOCKED": 28930,
+    "LIMIT_UP/A2_HIST2_LOCKED": 9142,
+    "LIMIT_UP/A3_NEAR_LIMIT_LOCKED": 1751,
+    "NORMAL/B_NORMAL_MOMENTUM": 32799
+  },
+  "analyzed_cohort_counts": {
+    "LIMIT_UP/A1_ALL_LOCKED": 28926,
+    "LIMIT_UP/A2_HIST2_LOCKED": 9141,
+    "LIMIT_UP/A3_NEAR_LIMIT_LOCKED": 1750,
+    "NORMAL/B_NORMAL_MOMENTUM": 32791
+  },
+  "excluded_legacy_events": 14,
+  "excluded_legacy_stock_ids": [
+    "6873"
+  ],
+  "ma20_not_ready_at_entry": 1306,
+  "rules": [
+    "NO_EARLY_EXIT",
+    "MA20_1D",
+    "MA20_2D",
+    "MA20_3D",
+    "STOP_5",
+    "STOP_7"
+  ],
+  "cost": 0.004798,
+  "entry": "T0 close",
+  "execution": "close-confirmed signal during T+1..T+19; next trading-day open; otherwise T+20 close"
+}

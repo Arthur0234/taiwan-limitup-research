@@ -3,6 +3,7 @@ data/raw/
 data/processed/*.parquet
 data/processed/*.csv
 data/processed/manifest.json
+research/issue_1_ma20/frozen_cohort_entries.csv
 
 # Generated research outputs
 output/
